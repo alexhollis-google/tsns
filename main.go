@@ -25,8 +25,8 @@ func main() {
 	flag.StringVar(&namespace, "namespace", "typesense", "The namespace that Typesense is installed within")
 	flag.StringVar(&service, "service", "ts", "The name of the Typesense service to use the endpoints of")
 	flag.StringVar(&nodesFile, "nodes-file", "/usr/share/typesense/nodes", "The location of the file to write node information to")
-	flag.IntVar(&apiPort, "api-port", 8108, "The port used by Typesense for peering")
-	flag.IntVar(&peerPort, "peer-port", 8107, "The port used by Typesense for peering")
+	flag.IntVar(&peerPort, "peer-port", 8107, "Port on which Typesense peering service listens")
+	flag.IntVar(&apiPort, "api-port", 8108, "Port on which Typesense API service listens")
 	flag.Parse()
 
 	configPath := filepath.Join(homedir.HomeDir(), ".kube", "config")
@@ -89,5 +89,11 @@ func getNodes(clients *kubernetes.Clientset) string {
 		}
 	}
 
-	return strings.Join(nodes, ",")
+	typesenseNodes := strings.Join(nodes, ",")
+
+	if len(nodes) != 0 {
+		log.Printf("New %d node configuration: %s\n", len(nodes), typesenseNodes)
+	}
+
+	return typesenseNodes
 }
