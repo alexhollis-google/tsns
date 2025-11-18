@@ -112,7 +112,10 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: ["endpoints"]
-  verbs: ["watch", "list"]
+  verbs: ["get", watch", "list"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", watch", "list"]
 ```
 
 ```

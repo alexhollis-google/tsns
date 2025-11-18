@@ -52,9 +52,9 @@ func main() {
 		log.Fatalf("failed to create kubernetes client: %s\n", err)
 	}
 
-	watcher, err := clients.CoreV1().Endpoints(namespace).Watch(context.Background(), metav1.ListOptions{})
+	watcher, err := clients.DiscoveryV1().EndpointSlices(namespace).Watch(context.Background(), metav1.ListOptions{})
 	if err != nil {
-		log.Fatalf("failed to create endpoints watcher: %s\n", err)
+		log.Printf("failed to create endpoints watcher: %s\n", err)
 	}
 
 	for range watcher.ResultChan() {
@@ -71,21 +71,25 @@ func main() {
 func getNodes(clients *kubernetes.Clientset) string {
 	var nodes []string
 
-	endpoints, err := clients.CoreV1().Endpoints(namespace).List(context.Background(), metav1.ListOptions{})
+	endpointSlices, err := clients.DiscoveryV1().EndpointSlices(namespace).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
 		log.Printf("failed to list endpoints: %s\n", err)
 		return ""
 	}
 
-	for _, e := range endpoints.Items {
-		if e.Name != service {
+	for _, es := range endpointSlices.Items {
+		fmt.Printf("  EndpointSlice Name: %s\n", es.Name)
+		if es.OwnerReferences[len(es.OwnerReferences)-1].Name != service {
 			continue
 		}
 
-		for _, s := range e.Subsets {
-			for _, a := range s.Addresses {
-				nodes = append(nodes, fmt.Sprintf("%s:%d:%d", a.IP, peerPort, apiPort))
+		for _, endpoint := range es.Endpoints {
+			fmt.Printf("    Endpoint Addresses: %v\n", endpoint.Addresses)
+			for _, a := range endpoint.Addresses {
+				nodes = append(nodes, fmt.Sprintf("%s:%d:%d", a, peerPort, apiPort))
+				fmt.Printf("	Nodes: %v\n", nodes)
 			}
+
 		}
 	}
 
