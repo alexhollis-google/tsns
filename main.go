@@ -65,7 +65,13 @@ func main() {
 		log.Fatalf("failed to create kubernetes client: %s\n", err)
 	}
 
-	factory := informers.NewSharedInformerFactory(clients, resyncPeriod)
+	log.Printf("Configured to watch namespace: %s", namespace)
+
+	factory := informers.NewSharedInformerFactoryWithOptions(
+		clients,
+		resyncPeriod,
+		informers.WithNamespace(namespace),
+	)
 	esInformer := factory.Discovery().V1().EndpointSlices()
 
 	esInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
