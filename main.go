@@ -5,17 +5,30 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/labels"
+)
+
+const (
+	// How often the informer will re-process the entire local cache
+	// to ensure the file is up to date.
+	resyncPeriod = 30 * time.Second
 )
 
 var namespace, service, nodesFile string
@@ -52,32 +65,55 @@ func main() {
 		log.Fatalf("failed to create kubernetes client: %s\n", err)
 	}
 
-	watcher, err := clients.DiscoveryV1().EndpointSlices(namespace).Watch(context.Background(), metav1.ListOptions{})
-	if err != nil {
-		log.Printf("failed to create endpoints watcher: %s\n", err)
-	}
+	factory := informers.NewSharedInformerFactory(clients, resyncPeriod)
+	esInformer := factory.Discovery().V1().EndpointSlices()
 
-	for range watcher.ResultChan() {
-		nodes := getNodes(clients)
-		if len(nodes) > 0 {
-			err := os.WriteFile(nodesFile, []byte(getNodes(clients)), 0666)
-			if err != nil {
-				log.Printf("failed to write nodes file: %s\n", err)
-			}
-		}
+	esInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			log.Println("Event: Add detected")
+			writeToFile(esInformer.Lister(), nodesFile)
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			// In a real app, you might check if the ResourceVersion changed,
+			// but for syncing to a file, we just write it out.
+			log.Println("Event: Update/Resync detected")
+			writeToFile(esInformer.Lister(), nodesFile)
+		},
+		DeleteFunc: func(obj interface{}) {
+			log.Println("Event: Delete detected")
+			writeToFile(esInformer.Lister(), nodesFile)
+		},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	log.Println("Starting EndpointSlice Watcher...")
+	factory.Start(ctx.Done())
+
+	log.Println("Waiting for cache to sync...")
+	if !cache.WaitForCacheSync(ctx.Done(), esInformer.Informer().HasSynced) {
+		log.Fatal("Timed out waiting for caches to sync")
 	}
+	log.Println("Cache synced. Watching for changes...")
+
+	writeToFile(esInformer.Lister(), nodesFile)
+
+	waitForShutdown(cancel)
 }
 
-func getNodes(clients *kubernetes.Clientset) string {
+func writeToFile(lister interface{}, filename string) {
 	var nodes []string
+	slices, err := lister.(interface {
+		List(selector labels.Selector) (ret []*discoveryv1.EndpointSlice, err error)
+	}).List(labels.SelectorFromSet(labels.Set{discoveryv1.LabelServiceName: service}))
 
-	endpointSlices, err := clients.DiscoveryV1().EndpointSlices(namespace).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
-		log.Printf("failed to list endpoints: %s\n", err)
-		return ""
+		log.Printf("Error listing endpoint slices from cache: %v", err)
+		return
 	}
 
-	for _, es := range endpointSlices.Items {
+	for _, es := range slices {
 		fmt.Printf("  EndpointSlice Name: %s\n", es.Name)
 		if es.OwnerReferences[len(es.OwnerReferences)-1].Name != service {
 			continue
@@ -85,19 +121,39 @@ func getNodes(clients *kubernetes.Clientset) string {
 
 		for _, endpoint := range es.Endpoints {
 			fmt.Printf("    Endpoint Addresses: %v\n", endpoint.Addresses)
-			for _, a := range endpoint.Addresses {
-				nodes = append(nodes, fmt.Sprintf("%s:%d:%d", a, peerPort, apiPort))
+			for _, addr := range endpoint.Addresses {
+				nodes = append(nodes, fmt.Sprintf("%s:%d:%d", addr, peerPort, apiPort))
 				fmt.Printf("	Nodes: %v\n", nodes)
 			}
 
 		}
 	}
-
 	typesenseNodes := strings.Join(nodes, ",")
 
 	if len(nodes) != 0 {
 		log.Printf("New %d node configuration: %s\n", len(nodes), typesenseNodes)
 	}
 
-	return typesenseNodes
+	tmpFile := filename + ".tmp"
+	err = ioutil.WriteFile(tmpFile, []byte(typesenseNodes), 0644)
+	if err != nil {
+		log.Printf("Error writing temp file: %v", err)
+		return
+	}
+
+	err = os.Rename(tmpFile, filename)
+	if err != nil {
+		log.Printf("Error renaming file to final destination: %v", err)
+		return
+	}
+
+	log.Printf("Successfully updated %s with %d EndpointSlices", filename, len(slices))
+}
+
+func waitForShutdown(cancel context.CancelFunc) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+	log.Println("Shutting down...")
+	cancel()
 }
